@@ -22,12 +22,26 @@ name: Devcontainer Feature - Publish
 # run): GHCR -> packages -> apm-cli -> Package settings -> change visibility
 # to Public, then "Manage Actions access" -> add microsoft/apm with Write.
 
+# --------------------------------------------------------------------------
+# TEMPORARILY DISABLED auto-publish on push.
+#
+# microsoft org GHCR policy blocks first-time package creation under
+# `ghcr.io/microsoft/apm/*` for both GITHUB_TOKEN and member PATs (read
+# allowed, write returns no WWW-Authenticate). Working on org bootstrap
+# via the microsoft/opensource process.
+#
+# Status: tracked alongside #861 follow-up. Re-enable the `push:` trigger
+# once `ghcr.io/microsoft/apm/apm-cli` is provisioned and linked to this
+# repo. Until then, the only way to publish is `workflow_dispatch`, which
+# also currently fails the same way -- left in place so we can validate
+# the bootstrap with a manual run the moment policy is granted.
+# --------------------------------------------------------------------------
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - 'devcontainer/src/**'
-      - '.github/workflows/devcontainer-feature-publish.yml'
+  # push:
+  #   branches: [ main ]
+  #   paths:
+  #     - 'devcontainer/src/**'
+  #     - '.github/workflows/devcontainer-feature-publish.yml'
   workflow_dispatch:
 
 permissions:
