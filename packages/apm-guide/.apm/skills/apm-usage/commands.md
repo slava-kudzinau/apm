@@ -21,6 +21,10 @@
 | `apm deps clean` | Clean dependency cache | `--dry-run`, `-y` skip confirm |
 | `apm deps update [PKGS...]` | Update specific packages | `--verbose`, `--force`, `--target` (comma-separated), `--parallel-downloads N` |
 
+### Install validation chain (virtual subdirectory packages)
+
+`apm install` validates subdirectory packages (`owner/repo/path#ref`) before writing to `apm.yml` using the same credential chain as the actual install. See [Authentication > Install validation chain](../authentication/) for the full probe sequence and troubleshooting.
+
 ## Compilation
 
 | Command | Purpose | Key flags |
