@@ -1700,7 +1700,14 @@ def _install_apm_packages(ctx, outcome):
     return apm_count, mcp_count, apm_diagnostics
 
 
-def _post_install_summary(*, logger, apm_count, mcp_count, apm_diagnostics, force):
+def _post_install_summary(
+    *,
+    logger,
+    apm_count,
+    mcp_count,
+    apm_diagnostics,
+    force,
+):
     """Render diagnostics and final install summary.
 
     Shows diagnostic details (if any), the install summary line, and
