@@ -81,11 +81,14 @@ class TestBuildRepoUrlTokenScoping:
         assert "ghp_TESTTOKEN" in url
         assert _url_host(url) == "company.ghe.com"
 
-    def test_gitlab_does_not_get_github_token(self):
-        dl = _make_downloader(github_token="ghp_TESTTOKEN")
+    def test_gitlab_https_uses_oauth2_not_x_access_token(self):
+        """GitLab PAT from GITHUB_APM_PAT is embedded as oauth2:<token>, never x-access-token."""
+        dl = _make_downloader(github_token="glpat_GITLABTEST")
         dep = _dep("https://gitlab.com/acme/rules.git")
         url = dl._build_repo_url("acme/rules", use_ssh=False, dep_ref=dep)
-        assert "ghp_TESTTOKEN" not in url
+        assert "x-access-token" not in url.lower()
+        assert "oauth2" in url
+        assert "glpat_GITLABTEST" in url
         assert _url_host(url) == "gitlab.com"
 
     def test_bitbucket_does_not_get_github_token(self):
@@ -177,9 +180,9 @@ class TestCloneWithFallbackEnv:
             return MockRepo.clone_from.call_args_list
 
     def test_generic_host_env_allows_credential_helpers(self):
-        """For GitLab/Bitbucket without token, GIT_ASKPASS / GIT_CONFIG_GLOBAL are NOT set."""
+        """For generic hosts (e.g. Bitbucket), GIT_ASKPASS / GIT_CONFIG_GLOBAL are NOT set."""
         dl = _make_downloader(github_token="ghp_TESTTOKEN")
-        dep = _dep("https://gitlab.com/acme/rules.git")
+        dep = _dep("https://bitbucket.org/acme/rules.git")
 
         calls = self._run_clone(dl, dep, succeed_on=1)
         assert len(calls) >= 1
@@ -228,7 +231,7 @@ class TestCloneWithFallbackEnv:
     def test_generic_host_explicit_https_strict_no_ssh_fallback(self):
         """Explicit https:// URL no longer silently falls back to SSH (issue #661)."""
         dl = _make_downloader(github_token="ghp_TESTTOKEN")
-        dep = _dep("https://gitlab.com/acme/rules.git")
+        dep = _dep("https://bitbucket.org/acme/rules.git")
 
         # All clone attempts fail; verify only HTTPS is attempted (no SSH).
         calls = self._run_clone(dl, dep, succeed_on=99)
@@ -348,10 +351,22 @@ class TestCloneWithFallbackEnv:
             assert "GIT_CONFIG_GLOBAL" not in envs[1]
             assert "GIT_CONFIG_NOSYSTEM" not in envs[1]
 
+    def test_gitlab_host_with_token_tries_oauth_https_first(self):
+        """GitLab with a PAT → Method 1 uses oauth2 HTTPS (not x-access-token)."""
+        dl = _make_downloader(github_token="glpat_GITLABCLONE")
+        dep = _dep("https://gitlab.com/acme/rules.git")
+
+        calls = self._run_clone(dl, dep, succeed_on=1)
+        first_url = calls[0][0][0]
+        assert "x-access-token" not in first_url.lower()
+        assert "oauth2" in first_url
+        assert "glpat_GITLABCLONE" in first_url
+        assert _url_host(first_url) == "gitlab.com"
+
     def test_generic_host_error_message_mentions_credential_helpers(self):
         """When all methods fail for a generic host, the error suggests credential helpers."""
         dl = _make_downloader(github_token="ghp_TESTTOKEN")
-        dep = _dep("https://gitlab.com/acme/rules.git")
+        dep = _dep("https://bitbucket.org/acme/rules.git")
 
         dl.auth_resolver._cache.clear()
         with (
@@ -784,7 +799,7 @@ dependencies:
     - path: foo/bar
 """,
         )
-        with pytest.raises(ValueError, match="'git' field|local filesystem path"):  # noqa: RUF043
+        with pytest.raises(ValueError, match=r"'git' field|local filesystem path"):
             APMPackage.from_apm_yml(yml)
 
 
@@ -809,9 +824,7 @@ class TestDictIdentityDuplicateDetection:
     @patch("apm_cli.commands.install._validate_package_exists", return_value=True)
     def test_dict_dep_with_path_not_duplicate_of_base(self, mock_validate, tmp_path):
         """A dict dep {git: X, path: Y} should not block adding the base repo X."""
-        import yaml  # noqa: F401
-
-        yml = self._write_yml(  # noqa: F841
+        self._write_yml(
             tmp_path,
             """
 name: test
@@ -894,7 +907,7 @@ class TestValidatePackageExistsEnv:
         from apm_cli.commands.install import _validate_package_exists
 
         mock_run.return_value = Mock(returncode=0)
-        _validate_package_exists("gitlab.com/acme/rules")
+        _validate_package_exists("git.example.com/acme/rules")
 
         # Verify subprocess.run was called
         assert mock_run.called
@@ -911,6 +924,30 @@ class TestValidatePackageExistsEnv:
         )
         # GIT_TERMINAL_PROMPT should still be '0' (no interactive prompts)
         assert env_used.get("GIT_TERMINAL_PROMPT") == "0"
+
+    @patch(
+        "apm_cli.core.token_manager.GitHubTokenManager.resolve_credential_from_git",
+        return_value=None,
+    )
+    @patch("subprocess.run")
+    @patch.dict(os.environ, {"GITHUB_APM_PAT": "glpat_lsremote_test"}, clear=True)
+    def test_gitlab_host_validation_uses_locked_env_with_pat(self, mock_run, _mock_cred):
+        """git ls-remote for GitLab with PAT uses locked-down git env like clone."""
+        from apm_cli.commands.install import _validate_package_exists
+
+        mock_run.return_value = Mock(returncode=0)
+        _validate_package_exists("gitlab.com/acme/rules")
+
+        assert mock_run.called
+        call_kwargs = mock_run.call_args
+        env_used = call_kwargs.kwargs.get("env") or call_kwargs[1].get("env", {})
+        assert env_used.get("GIT_ASKPASS") == "echo"
+        assert env_used.get("GIT_CONFIG_NOSYSTEM") == "1"
+        cmd = mock_run.call_args[0][0]
+        url_arg = cmd[-1]
+        assert "oauth2" in url_arg
+        assert "glpat_lsremote_test" in url_arg
+        assert "x-access-token" not in url_arg.lower()
 
     @patch(
         "apm_cli.core.token_manager.GitHubTokenManager.resolve_credential_from_git",
@@ -942,6 +979,33 @@ class TestValidatePackageExistsEnv:
         return_value=None,
     )
     @patch("subprocess.run")
+    @patch.dict(os.environ, {}, clear=True)
+    def test_gitlab_virtual_subdirectory_uses_git_ls_remote(self, mock_run, _mock_cred):
+        """Dict git+path subdirectory on GitLab validates the repo root via git ls-remote."""
+        from apm_cli.commands.install import _validate_package_exists
+
+        mock_run.return_value = Mock(returncode=0)
+        dep_ref = DependencyReference.parse_from_dict(
+            {
+                "git": "https://gitlab.com/acme/monorepo.git",
+                "path": "skills/foo",
+            }
+        )
+        assert dep_ref.is_virtual_subdirectory()
+        ok = _validate_package_exists(
+            "gitlab.com/acme/monorepo/skills/foo",
+            dep_ref=dep_ref,
+        )
+        assert ok is True
+        assert mock_run.called
+        cmd = mock_run.call_args[0][0]
+        assert cmd[:3] == ["git", "ls-remote", "--heads"]
+
+    @patch(
+        "apm_cli.core.token_manager.GitHubTokenManager.resolve_credential_from_git",
+        return_value=None,
+    )
+    @patch("subprocess.run")
     @patch.dict(os.environ, {"ADO_APM_PAT": "test-ado-token"}, clear=True)
     def test_ado_host_validation_uses_locked_env(self, mock_run, _mock_cred):
         """git ls-remote for ADO should use the locked-down env (APM manages auth)."""
@@ -959,6 +1023,101 @@ class TestValidatePackageExistsEnv:
 
 
 # ===========================================================================
+# GitLab direct host/path shorthand (repo-boundary probing)
+# ===========================================================================
+
+
+class TestGitLabDirectShorthandProbing:
+    """Earliest-qualifying repo boundary for GitLab-class FQDN shorthand (see install probe)."""
+
+    @patch(
+        "apm_cli.core.token_manager.GitHubTokenManager.resolve_credential_from_git",
+        return_value=None,
+    )
+    @patch("subprocess.run", return_value=Mock(returncode=0))
+    @patch.dict(
+        os.environ,
+        {"GITLAB_HOST": "git.epam.com", "GITHUB_APM_PAT": "glpat_direct_shorthand_test"},
+        clear=True,
+    )
+    def test_resolves_earliest_repo_and_virtual_path(self, mock_run, _mock_cred):
+        from apm_cli.commands.install import _try_resolve_gitlab_direct_shorthand
+        from apm_cli.core.auth import AuthResolver
+
+        r = _try_resolve_gitlab_direct_shorthand(
+            "git.epam.com/epm-ease/apm-registry/agents/reverse-architect",
+            auth_resolver=AuthResolver(),
+        )
+        assert r is not None
+        assert r.host == "git.epam.com"
+        assert r.repo_url == "epm-ease/apm-registry"
+        assert r.virtual_path == "agents/reverse-architect"
+        assert r.is_virtual_subdirectory()
+        assert mock_run.call_count == 1
+        url_arg = mock_run.call_args[0][0][-1]
+        assert "epm-ease/apm-registry" in url_arg
+        assert "oauth2" in url_arg
+
+    @patch(
+        "apm_cli.core.token_manager.GitHubTokenManager.resolve_credential_from_git",
+        return_value=None,
+    )
+    @patch("subprocess.run")
+    @patch.dict(
+        os.environ,
+        {"GITLAB_HOST": "git.epam.com", "GITHUB_APM_PAT": "glpat_t"},
+        clear=True,
+    )
+    def test_skips_unreachable_ancestor_tries_deeper(self, mock_run, _mock_cred):
+        """If ls-remote fails for an earlier boundary, a deeper candidate may still win."""
+        from apm_cli.commands.install import _try_resolve_gitlab_direct_shorthand
+        from apm_cli.core.auth import AuthResolver
+
+        mock_run.side_effect = [
+            Mock(returncode=128, stderr="not found"),
+            Mock(returncode=0, stderr=""),
+        ]
+        r = _try_resolve_gitlab_direct_shorthand(
+            "git.epam.com/a/b/c/d",
+            auth_resolver=AuthResolver(),
+        )
+        assert r is not None
+        assert r.repo_url == "a/b/c"
+        assert r.virtual_path == "d"
+        assert mock_run.call_count == 2
+
+    @patch(
+        "apm_cli.core.token_manager.GitHubTokenManager.resolve_credential_from_git",
+        return_value=None,
+    )
+    @patch("subprocess.run", return_value=Mock(returncode=0))
+    @patch.dict(
+        os.environ,
+        {"GITLAB_HOST": "git.epam.com", "GITHUB_APM_PAT": "glpat_t"},
+        clear=True,
+    )
+    def test_dict_git_plus_path_still_uses_single_ls_remote_for_validation(
+        self, mock_run, _mock_cred
+    ):
+        """Explicit object-form GitLab (git + path) is not expanded via shorthand probing."""
+        from apm_cli.commands.install import _validate_package_exists
+
+        dep_ref = DependencyReference.parse_from_dict(
+            {
+                "git": "https://gitlab.com/acme/monorepo.git",
+                "path": "skills/foo",
+            }
+        )
+        assert dep_ref.is_virtual_subdirectory()
+        ok = _validate_package_exists(
+            "gitlab.com/acme/monorepo/skills/foo",
+            dep_ref=dep_ref,
+        )
+        assert ok is True
+        assert mock_run.call_count == 1
+
+
+# ===========================================================================
 # is_github classification edge cases
 # ===========================================================================
 
@@ -968,7 +1127,7 @@ class TestIsGitHubClassification:
 
     def test_empty_host_defaults_to_github(self):
         """When no host is set, packages default to GitHub behavior."""
-        downloader = _make_downloader(github_token="ghp_test123")  # noqa: F841
+        _make_downloader(github_token="ghp_test123")
         dep_ref = _dep("microsoft/apm-sample-package")
 
         # No host set → is_github should be True
@@ -977,10 +1136,7 @@ class TestIsGitHubClassification:
         # With empty/None dep_host, this should return True
         from apm_cli.utils.github_host import is_github_hostname
 
-        if dep_host:  # noqa: SIM108
-            is_github = is_github_hostname(dep_host)
-        else:
-            is_github = True
+        is_github = is_github_hostname(dep_host) if dep_host else True
         assert is_github is True
 
     def test_gitlab_host_is_not_github(self):

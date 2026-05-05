@@ -4,7 +4,7 @@ sidebar:
   order: 4
 ---
 
-APM works without tokens for public packages on github.com. Authentication is needed for private repositories, enterprise hosts (`*.ghe.com`, GHES), and Azure DevOps.
+APM works without tokens for public packages on github.com. Authentication is needed for private repositories, enterprise hosts (`*.ghe.com`, GHES), GitLab (private or API access), and Azure DevOps.
 
 ## How APM resolves authentication
 
@@ -199,6 +199,23 @@ Bearer tokens are short-lived (~60 minutes), acquired on demand, never persisted
 
 When authentication fails, APM prints a targeted diagnostic instead of a generic "not accessible or doesn't exist" message. The diagnostic tells you exactly which path failed and what to do next. For `--update` operations, APM verifies auth *before* modifying any files -- if the pre-flight check fails, you will see `No files were modified` and your `apm.yml`, `apm.lock.yaml`, and `apm_modules/` directory remain untouched.
 
+## GitLab (SaaS and self-managed)
+
+### Host classification
+
+APM must classify a host as GitLab to use **GitLab REST v4** (for example `marketplace.json` fetches and install-time single-file reads). Configuration mirrors GHES-style host overrides:
+
+| Variable | Purpose |
+|----------|---------|
+| `GITLAB_HOST` | One self-managed GitLab FQDN (e.g. `git.company.com`) |
+| `APM_GITLAB_HOSTS` | Several self-managed GitLab FQDNs, comma-separated |
+
+`gitlab.com` is detected automatically. There is no GitLab-specific token variable name: resolved credentials use the same precedence as other git hosts — per-org `GITHUB_APM_PAT_{ORG}`, then `GITHUB_APM_PAT` → `GITHUB_TOKEN` → `GH_TOKEN`, then `git credential fill` (see [Token lookup](#token-lookup)). Use a GitLab personal or project access token with API read access where your policy requires it.
+
+### REST headers (GitLab vs GitHub)
+
+For GitHub and GHES, APM sends repository API requests with `Authorization: token <PAT>` (or equivalent). For **GitLab REST v4**, PATs are sent with the **`PRIVATE-TOKEN`** header (GitLab’s convention). OAuth-style access tokens can use `Authorization: Bearer` when applicable. APM does not log token values.
+
 ## Package source behavior
 
 | Package source | Host | Auth behavior | Fallback |
@@ -207,6 +224,7 @@ When authentication fails, APM prints a targeted diagnostic instead of a generic
 | `github.com/org/repo` | github.com | Global env vars → credential fill | Unauth for public repos |
 | `contoso.ghe.com/org/repo` | *.ghe.com | Global env vars → credential fill | Auth-only (no public repos) |
 | GHES via `GITHUB_HOST` | ghes.company.com | Global env vars → credential fill | Unauth for public repos |
+| GitLab (`gitlab.com` or host listed in `GITLAB_HOST` / `APM_GITLAB_HOSTS`) | gitlab.com or self-managed | Same global/per-org/credential chain as above; REST uses `PRIVATE-TOKEN` | Unauth for public repos where the instance allows it |
 | `dev.azure.com/org/proj/repo` | ADO | `ADO_APM_PAT` -> AAD bearer via `az` | Auth-only |
 | Artifactory registry proxy | custom FQDN | `PROXY_REGISTRY_TOKEN` | Error if `PROXY_REGISTRY_ONLY=1` |
 
@@ -292,7 +310,7 @@ Run with `--verbose` to see the full resolution chain:
 apm install --verbose your-org/package
 ```
 
-The output shows which env var matched (or `none`), the detected token type (`fine-grained`, `classic`, `oauth`, `github-app`), and the host classification (`github`, `ghe_cloud`, `ghes`, `ado`, `generic`).
+The output shows which env var matched (or `none`), the detected token type (`fine-grained`, `classic`, `oauth`, `github-app`), and the host classification (`github`, `ghe_cloud`, `ghes`, `ado`, `gitlab`, `generic`).
 
 The full resolution and fallback flow:
 

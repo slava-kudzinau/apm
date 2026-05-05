@@ -33,13 +33,13 @@ import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Optional, TypeVar  # noqa: F401
+from typing import TYPE_CHECKING, TypeVar
 
 from apm_cli.core.token_manager import GitHubTokenManager
 from apm_cli.utils.github_host import (
     default_host,
     is_azure_devops_hostname,
-    is_github_hostname,  # noqa: F401
+    is_gitlab_hostname,
     is_valid_fqdn,
 )
 
@@ -59,7 +59,7 @@ class HostInfo:
     """Immutable description of a remote Git host."""
 
     host: str
-    kind: str  # "github" | "ghe_cloud" | "ghes" | "ado" | "generic"
+    kind: str  # "github" | "ghe_cloud" | "ghes" | "ado" | "gitlab" | "generic"
     has_public_repos: bool
     api_base: str
     port: int | None = None  # Non-standard git port (e.g. 7999 for Bitbucket DC)
@@ -179,7 +179,7 @@ class AuthResolver:
         if (
             ghes_host
             and ghes_host == h
-            and ghes_host != "github.com"
+            and ghes_host not in {"github.com", "gitlab.com"}
             and not ghes_host.endswith(".ghe.com")
         ):
             if is_valid_fqdn(ghes_host):
@@ -191,7 +191,20 @@ class AuthResolver:
                     port=port,
                 )
 
-        # Generic FQDN (GitLab, Bitbucket, self-hosted, etc.)
+        # GitLab (SaaS + env-configured self-managed) — after GHES per spec (no silent GHES → GitLab)
+        if is_gitlab_hostname(host):
+            if h == "gitlab.com":
+                api_base = "https://gitlab.com/api/v4"
+            else:
+                api_base = f"https://{host}/api/v4"
+            return HostInfo(
+                host=host,
+                kind="gitlab",
+                has_public_repos=True,
+                api_base=api_base,
+            )
+
+        # Generic FQDN (Bitbucket, self-hosted non-GitLab, etc.)
         return HostInfo(
             host=host,
             kind="generic",
@@ -232,6 +245,26 @@ class AuthResolver:
         if token.startswith("ghr_"):
             return "github-app"
         return "unknown"
+
+    @staticmethod
+    def gitlab_rest_headers(
+        token: str | None,
+        *,
+        oauth_bearer: bool = False,
+    ) -> dict[str, str]:
+        """Build HTTP headers for GitLab REST API v4 calls.
+
+        Personal access tokens use ``PRIVATE-TOKEN``. OAuth2 access tokens
+        typically use ``Authorization: Bearer <token>``; set *oauth_bearer*
+        to use that style.
+
+        Does not log or print *token*. Callers must not log the returned dict.
+        """
+        if not token:
+            return {}
+        if oauth_bearer:
+            return {"Authorization": f"Bearer {token}"}
+        return {"PRIVATE-TOKEN": token}
 
     # -- core resolution ----------------------------------------------------
 
@@ -484,16 +517,16 @@ class AuthResolver:
                     # a 404, a network error, etc.) so the wording stays
                     # tentative -- see #856 review C6.
                     return (
-                        f"\n    ADO_APM_PAT is set, and Azure CLI credentials may also be available,\n"  # noqa: F541
-                        f"    but the Azure DevOps request still failed.\n\n"  # noqa: F541
-                        f"    If this is an authentication failure, the PAT may be expired, revoked,\n"  # noqa: F541
-                        f"    or scoped to a different org, and Azure CLI credentials may need to\n"  # noqa: F541
-                        f"    be refreshed.\n\n"  # noqa: F541
-                        f"    To fix:\n"  # noqa: F541
-                        f"      1. Unset the PAT to test Azure CLI auth only:  unset ADO_APM_PAT\n"  # noqa: F541
-                        f"      2. Re-authenticate Azure CLI if needed:        az login\n"  # noqa: F541
-                        f"      3. Retry:                                       apm install\n\n"  # noqa: F541
-                        f"    Docs: https://microsoft.github.io/apm/getting-started/authentication/#azure-devops"  # noqa: F541
+                        "\n    ADO_APM_PAT is set, and Azure CLI credentials may also be available,\n"
+                        "    but the Azure DevOps request still failed.\n\n"
+                        "    If this is an authentication failure, the PAT may be expired, revoked,\n"
+                        "    or scoped to a different org, and Azure CLI credentials may need to\n"
+                        "    be refreshed.\n\n"
+                        "    To fix:\n"
+                        "      1. Unset the PAT to test Azure CLI auth only:  unset ADO_APM_PAT\n"
+                        "      2. Re-authenticate Azure CLI if needed:        az login\n"
+                        "      3. Retry:                                       apm install\n\n"
+                        "    Docs: https://microsoft.github.io/apm/getting-started/authentication/#azure-devops"
                     )
                 # PAT set but rejected, no az -> bare PAT failure
                 return (
@@ -525,13 +558,13 @@ class AuthResolver:
             if tenant is None:
                 # Case 3: az present, not logged in
                 return (
-                    f"\n    Azure DevOps requires authentication. You have two options:\n\n"  # noqa: F541
-                    f"    1. Sign in with Azure CLI (recommended for Entra ID users):\n"  # noqa: F541
-                    f"         az login\n"  # noqa: F541
-                    f"         apm install                   # retry -- no env var needed\n\n"  # noqa: F541
-                    f"    2. Use a Personal Access Token:\n"  # noqa: F541
-                    f"         export ADO_APM_PAT=your_token\n\n"  # noqa: F541
-                    f"    Docs: https://microsoft.github.io/apm/getting-started/authentication/#azure-devops"  # noqa: F541
+                    "\n    Azure DevOps requires authentication. You have two options:\n\n"
+                    "    1. Sign in with Azure CLI (recommended for Entra ID users):\n"
+                    "         az login\n"
+                    "         apm install                   # retry -- no env var needed\n\n"
+                    "    2. Use a Personal Access Token:\n"
+                    "         export ADO_APM_PAT=your_token\n\n"
+                    "    Docs: https://microsoft.github.io/apm/getting-started/authentication/#azure-devops"
                 )
 
             # Case 2: az returned token (tenant known) but ADO rejected it
@@ -685,8 +718,7 @@ class AuthResolver:
         """
         env = os.environ.copy()
         env["GIT_TERMINAL_PROMPT"] = "0"
-        # On Windows, GIT_ASKPASS='' can cause issues; use 'echo' instead
-        env["GIT_ASKPASS"] = "" if sys.platform != "win32" else "echo"
+        env["GIT_ASKPASS"] = "echo"
         if scheme == "bearer" and token and host_kind == "ado":
             # B2 #852: skip GIT_TOKEN for bearer scheme -- the JWT is injected via
             # GIT_CONFIG_VALUE_0 only; GIT_TOKEN here would leak it into every
