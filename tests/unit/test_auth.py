@@ -8,7 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from apm_cli.core import azure_cli as _azure_cli_mod
-from apm_cli.core.auth import AuthContext, AuthResolver, HostInfo  # noqa: F401
+from apm_cli.core.auth import AuthResolver, HostInfo
 from apm_cli.core.token_manager import GitHubTokenManager
 
 
@@ -53,8 +53,51 @@ class TestClassifyHost:
             hi = AuthResolver.classify_host("github.mycompany.com")
             assert hi.kind == "ghes"
 
-    def test_generic_fqdn(self):
+    def test_gitlab_com(self):
         hi = AuthResolver.classify_host("gitlab.com")
+        assert hi.kind == "gitlab"
+        assert hi.api_base == "https://gitlab.com/api/v4"
+        assert hi.has_public_repos is True
+
+    def test_gitlab_com_not_ghes_even_if_github_host_env_set(self):
+        """gitlab.com is well-known SaaS; do not treat as GHES when GITHUB_HOST matches."""
+        with patch.dict(os.environ, {"GITHUB_HOST": "gitlab.com"}, clear=False):
+            hi = AuthResolver.classify_host("gitlab.com")
+            assert hi.kind == "gitlab"
+            assert hi.api_base == "https://gitlab.com/api/v4"
+
+    def test_gitlab_self_managed_gitlab_host_env(self):
+        with patch.dict(os.environ, {"GITLAB_HOST": "git.corp.example.com"}, clear=False):
+            hi = AuthResolver.classify_host("git.corp.example.com")
+            assert hi.kind == "gitlab"
+            assert hi.api_base == "https://git.corp.example.com/api/v4"
+
+    def test_gitlab_self_managed_apm_gitlab_hosts_env(self):
+        with patch.dict(
+            os.environ,
+            {"APM_GITLAB_HOSTS": "git.epam.com, gitlab.corp.io"},
+            clear=False,
+        ):
+            hi = AuthResolver.classify_host("gitlab.corp.io")
+            assert hi.kind == "gitlab"
+            assert hi.api_base == "https://gitlab.corp.io/api/v4"
+
+    def test_ghes_wins_over_gitlab_when_same_host_in_both_envs(self):
+        """GITHUB_HOST match must not be reclassified as GitLab (spec Critical Rules)."""
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_HOST": "git.company.com",
+                "APM_GITLAB_HOSTS": "git.company.com",
+            },
+            clear=False,
+        ):
+            hi = AuthResolver.classify_host("git.company.com")
+            assert hi.kind == "ghes"
+            assert "api/v3" in hi.api_base
+
+    def test_generic_fqdn_not_in_gitlab_allowlist(self):
+        hi = AuthResolver.classify_host("bitbucket.org")
         assert hi.kind == "generic"
 
     def test_case_insensitive(self):
@@ -88,6 +131,25 @@ class TestDetectTokenType:
 
     def test_unknown(self):
         assert AuthResolver.detect_token_type("some-random-token") == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# TestGitlabRestHeaders
+# ---------------------------------------------------------------------------
+
+
+class TestGitlabRestHeaders:
+    def test_no_token_returns_empty_dict(self):
+        assert AuthResolver.gitlab_rest_headers(None) == {}
+        assert AuthResolver.gitlab_rest_headers("") == {}
+
+    def test_pat_uses_private_token_header(self):
+        headers = AuthResolver.gitlab_rest_headers("glpat-secret")
+        assert headers == {"PRIVATE-TOKEN": "glpat-secret"}
+
+    def test_oauth_bearer_style(self):
+        headers = AuthResolver.gitlab_rest_headers("oauth-access-token", oauth_bearer=True)
+        assert headers == {"Authorization": "Bearer oauth-access-token"}
 
 
 # ---------------------------------------------------------------------------
@@ -165,36 +227,34 @@ class TestResolve:
             time.sleep(0.05)
             return ("cred-token", "git-credential-fill", "basic")
 
-        with (
-            patch.object(
-                AuthResolver, "_resolve_token", side_effect=_slow_resolve_token
-            ) as mock_resolve,
-            ThreadPoolExecutor(max_workers=8) as pool,
-        ):
-            futures = [pool.submit(resolver.resolve, "github.com", "microsoft") for _ in range(8)]
-            contexts = [f.result() for f in futures]
+        with patch.object(
+            AuthResolver, "_resolve_token", side_effect=_slow_resolve_token
+        ) as mock_resolve:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                futures = [
+                    pool.submit(resolver.resolve, "github.com", "microsoft") for _ in range(8)
+                ]
+                contexts = [f.result() for f in futures]
 
         assert mock_resolve.call_count == 1
         assert all(ctx is contexts[0] for ctx in contexts)
 
     def test_different_orgs_different_cache(self):
         """Different orgs get different cache entries."""
-        with (
-            patch.dict(
-                os.environ,
-                {
-                    "GITHUB_APM_PAT_ORG_A": "token-a",
-                    "GITHUB_APM_PAT_ORG_B": "token-b",
-                },
-                clear=True,
-            ),
-            patch.object(GitHubTokenManager, "resolve_credential_from_git", return_value=None),
+        with patch.dict(
+            os.environ,
+            {
+                "GITHUB_APM_PAT_ORG_A": "token-a",
+                "GITHUB_APM_PAT_ORG_B": "token-b",
+            },
+            clear=True,
         ):
-            resolver = AuthResolver()
-            ctx_a = resolver.resolve("github.com", org="org-a")
-            ctx_b = resolver.resolve("github.com", org="org-b")
-            assert ctx_a.token == "token-a"
-            assert ctx_b.token == "token-b"
+            with patch.object(GitHubTokenManager, "resolve_credential_from_git", return_value=None):
+                resolver = AuthResolver()
+                ctx_a = resolver.resolve("github.com", org="org-a")
+                ctx_b = resolver.resolve("github.com", org="org-b")
+                assert ctx_a.token == "token-a"
+                assert ctx_b.token == "token-b"
 
     def test_ado_token(self):
         """ADO host resolves ADO_APM_PAT."""
@@ -206,16 +266,14 @@ class TestResolve:
 
     def test_credential_fallback(self):
         """Falls back to git credential helper when no env vars."""
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(
                 GitHubTokenManager, "resolve_credential_from_git", return_value="cred-token"
-            ),
-        ):
-            resolver = AuthResolver()
-            ctx = resolver.resolve("github.com")
-            assert ctx.token == "cred-token"
-            assert ctx.source == "git-credential-fill"
+            ):
+                resolver = AuthResolver()
+                ctx = resolver.resolve("github.com")
+                assert ctx.token == "cred-token"
+                assert ctx.source == "git-credential-fill"
 
     def test_global_var_resolves_for_non_default_host(self):
         """GITHUB_APM_PAT resolves for *.ghe.com (any host, not just default)."""
@@ -371,19 +429,17 @@ class TestTryWithFallback:
 
     def test_no_credential_fallback_when_source_is_credential(self):
         """When token already came from git-credential-fill, no retry on failure."""
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(
+        with patch.dict(os.environ, {}, clear=True):
+            with patch.object(
                 GitHubTokenManager, "resolve_credential_from_git", return_value="cred-token"
-            ),
-        ):
-            resolver = AuthResolver()
+            ):
+                resolver = AuthResolver()
 
-            def op(token, env):
-                raise RuntimeError("Bad credentials")
+                def op(token, env):
+                    raise RuntimeError("Bad credentials")
 
-            with pytest.raises(RuntimeError, match="Bad credentials"):
-                resolver.try_with_fallback("contoso.ghe.com", op)
+                with pytest.raises(RuntimeError, match="Bad credentials"):
+                    resolver.try_with_fallback("contoso.ghe.com", op)
 
     def test_credential_fallback_on_auth_first_path(self):
         """Auth-first on public host: auth fails, unauth fails → credential fill kicks in."""

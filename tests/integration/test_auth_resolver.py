@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
-from apm_cli.core.auth import AuthResolver, HostInfo  # noqa: F401
+from apm_cli.core.auth import AuthResolver
 from apm_cli.core.token_manager import GitHubTokenManager
 
 # ---------------------------------------------------------------------------
@@ -272,7 +272,7 @@ class TestClassifyHostVariants:
             ("ACME.GHE.COM", "ghe_cloud", False),
             ("dev.azure.com", "ado", True),
             ("myorg.visualstudio.com", "ado", True),
-            ("gitlab.com", "generic", True),
+            ("gitlab.com", "gitlab", True),
             ("bitbucket.org", "generic", True),
             ("git.internal.corp", "generic", True),
         ],
@@ -300,6 +300,7 @@ class TestClassifyHostVariants:
                 AuthResolver.classify_host("acme.ghe.com").api_base == "https://acme.ghe.com/api/v3"
             )
             assert AuthResolver.classify_host("dev.azure.com").api_base == "https://dev.azure.com"
+            assert AuthResolver.classify_host("gitlab.com").api_base == "https://gitlab.com/api/v4"
 
 
 # ---------------------------------------------------------------------------
