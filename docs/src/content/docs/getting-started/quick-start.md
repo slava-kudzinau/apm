@@ -61,6 +61,10 @@ This is where it gets interesting. Install a package and watch what happens:
 apm install microsoft/apm-sample-package#v1.0.0
 ```
 
+:::tip[Already use the gh CLI?]
+If you are logged in with `gh auth login`, APM is already authenticated for private GitHub packages on github.com, `*.ghe.com`, and GHES -- no env vars to set.
+:::
+
 APM downloads the package, resolves its dependencies, and deploys files directly into the directories your AI tools already watch:
 
 ```
@@ -156,7 +160,7 @@ apm install github/awesome-copilot/skills/review-and-refactor
 - `apm_modules/` -- add to `.gitignore`. Rebuilt from the lockfile on install.
 
 :::tip[Keeping deployed files in sync]
-When you update `apm.yml`, re-run `apm install` and commit the changed `.github/`, `.claude/`, `.cursor/`, and `.gemini/` files. A [CI drift check](../../integrations/ci-cd/#verify-deployed-primitives) catches stale files automatically.
+When you update `apm.yml`, re-run `apm install` and commit the changed `.github/`, `.claude/`, `.cursor/`, and `.gemini/` files. A [CI drift check](../../guides/drift-detection/) catches stale files automatically.
 :::
 
 :::note[Using Codex or Gemini?]
